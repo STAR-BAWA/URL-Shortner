@@ -1,7 +1,10 @@
 import sql from "./db.js";
 
 
+// ==========================================
 // Generate a random shortcode
+// ==========================================
+
 function generateCode() {
   return Math.random()
     .toString(36)
@@ -9,9 +12,14 @@ function generateCode() {
 }
 
 
-// Generate a shortcode that doesn't already exist
+// ==========================================
+// Generate a unique shortcode
+// ==========================================
+
 async function generateUniqueCode() {
+
   while (true) {
+
     const shortcode = generateCode();
 
     const existing = await sql`
@@ -27,7 +35,12 @@ async function generateUniqueCode() {
 }
 
 
+// ==========================================
+// Start Bun server
+// ==========================================
+
 const server = Bun.serve({
+
   port: 3000,
 
   async fetch(request) {
@@ -43,9 +56,11 @@ const server = Bun.serve({
       url.pathname === "/" &&
       request.method === "GET"
     ) {
+
       return new Response(
         "URL Shortener is running!"
       );
+
     }
 
 
@@ -60,11 +75,49 @@ const server = Bun.serve({
 
       try {
 
+        // ------------------------------------------
         // Read JSON body
+        // ------------------------------------------
+
         const body = await request.json();
 
         const originalUrl = body.url;
         const customCode = body.customCode;
+        const expiresIn = body.expiresIn;
+
+
+        // ------------------------------------------
+        // Calculate expiration
+        // ------------------------------------------
+
+        let expiresAt = null;
+
+        if (
+          expiresIn !== undefined &&
+          expiresIn !== null
+        ) {
+
+          if (
+            typeof expiresIn !== "number" ||
+            expiresIn <= 0
+          ) {
+
+            return Response.json(
+              {
+                error: "expiresIn must be a positive number"
+              },
+              {
+                status: 400
+              }
+            );
+
+          }
+
+          expiresAt = new Date(
+            Date.now() + expiresIn * 1000
+          );
+
+        }
 
 
         // ------------------------------------------
@@ -72,6 +125,7 @@ const server = Bun.serve({
         // ------------------------------------------
 
         if (!originalUrl) {
+
           return Response.json(
             {
               error: "URL is required"
@@ -80,6 +134,7 @@ const server = Bun.serve({
               status: 400
             }
           );
+
         }
 
 
@@ -116,7 +171,8 @@ const server = Bun.serve({
 
             return Response.json(
               {
-                error: "Custom code must be 10 characters or less"
+                error:
+                  "Custom code must be 10 characters or less"
               },
               {
                 status: 400
@@ -126,7 +182,8 @@ const server = Bun.serve({
           }
 
 
-          // Only allow letters, numbers, hyphen and underscore
+          // Only letters, numbers,
+          // hyphen and underscore
           if (!/^[a-zA-Z0-9_-]+$/.test(customCode)) {
 
             return Response.json(
@@ -153,11 +210,11 @@ const server = Bun.serve({
 
         if (customCode) {
 
-          // User provided custom code
+          // Use custom shortcode
           shortcode = customCode;
 
 
-          // Check if it already exists
+          // Check if custom shortcode already exists
           const existing = await sql`
             SELECT id
             FROM urls
@@ -169,7 +226,8 @@ const server = Bun.serve({
 
             return Response.json(
               {
-                error: "Custom shortcode already exists"
+                error:
+                  "Custom shortcode already exists"
               },
               {
                 status: 409
@@ -181,7 +239,8 @@ const server = Bun.serve({
         } else {
 
           // Generate random shortcode
-          shortcode = await generateUniqueCode();
+          shortcode =
+            await generateUniqueCode();
 
         }
 
@@ -191,19 +250,34 @@ const server = Bun.serve({
         // ------------------------------------------
 
         await sql`
+
           INSERT INTO urls (
             shortcode,
-            original_url
+            original_url,
+            expires_at,
+            click_count
           )
+
           VALUES (
             ${shortcode},
-            ${originalUrl}
+            ${originalUrl},
+            ${expiresAt},
+            0
           )
+
         `;
 
 
+        // ------------------------------------------
+        // Log
+        // ------------------------------------------
+
         console.log(
-          `Saved: ${shortcode} → ${originalUrl}`
+          `Saved: ${shortcode} → ${originalUrl}${
+            expiresAt
+              ? ` (expires at ${expiresAt})`
+              : ""
+          }`
         );
 
 
@@ -223,11 +297,13 @@ const server = Bun.serve({
 
       } catch (error) {
 
-        console.error(error);
+        console.error("ERROR:", error);
 
         return Response.json(
           {
-            error: "Something went wrong"
+            error:
+              "Something went wrong: " +
+              error.message
           },
           {
             status: 500
@@ -250,7 +326,10 @@ const server = Bun.serve({
         url.pathname.substring(1);
 
 
-      // Make sure shortcode exists
+      // ------------------------------------------
+      // Check shortcode exists
+      // ------------------------------------------
+
       if (!shortcode) {
 
         return new Response(
@@ -265,15 +344,28 @@ const server = Bun.serve({
 
       try {
 
-        // Find original URL
+        // ------------------------------------------
+        // Find URL, expiration and click count
+        // ------------------------------------------
+
         const result = await sql`
-          SELECT original_url
+
+          SELECT
+            original_url,
+            expires_at,
+            click_count
+
           FROM urls
+
           WHERE shortcode = ${shortcode}
+
         `;
 
 
+        // ------------------------------------------
         // Shortcode doesn't exist
+        // ------------------------------------------
+
         if (result.length === 0) {
 
           return new Response(
@@ -286,12 +378,55 @@ const server = Bun.serve({
         }
 
 
-        // Get original URL
+        // ------------------------------------------
+        // Get values
+        // ------------------------------------------
+
         const originalUrl =
           result[0].original_url;
 
+        const expiresAt =
+          result[0].expires_at;
 
+
+        // ------------------------------------------
+        // Check expiration
+        // ------------------------------------------
+
+        if (
+          expiresAt &&
+          new Date() > new Date(expiresAt)
+        ) {
+
+          return new Response(
+            "This short URL has expired",
+            {
+              status: 410
+            }
+          );
+
+        }
+
+
+        // ------------------------------------------
+        // Increase click count
+        // ------------------------------------------
+
+        await sql`
+
+          UPDATE urls
+
+          SET click_count = click_count + 1
+
+          WHERE shortcode = ${shortcode}
+
+        `;
+
+
+        // ------------------------------------------
         // Redirect
+        // ------------------------------------------
+
         return Response.redirect(
           originalUrl,
           302
@@ -300,7 +435,7 @@ const server = Bun.serve({
 
       } catch (error) {
 
-        console.error(error);
+        console.error("ERROR:", error);
 
         return new Response(
           "Internal Server Error",
@@ -326,8 +461,13 @@ const server = Bun.serve({
     );
 
   }
+
 });
 
+
+// ==========================================
+// Server started
+// ==========================================
 
 console.log(
   `Server running on http://localhost:${server.port}`
