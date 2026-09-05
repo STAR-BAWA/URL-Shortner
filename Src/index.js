@@ -1,5 +1,25 @@
 import sql from "./db.js";
+import redis from "./redis.js";
 
+
+async function isRateLimited(ip) {
+
+  const key = `rate_limit:${ip}`;
+  const count = await redis.incr(key);
+  if (count === 1) {
+    await redis.expire(key, 60);
+  }
+
+  return count > 5
+}
+
+//get remaining time for rate limit 
+async function getRetryAfter(ip) {
+  const key = "rate_limit:" + ip;
+  const ttl = await redis.ttl(key);
+  return ttl;
+
+}
 
 // ==========================================
 // Generate a random shortcode
@@ -52,6 +72,8 @@ const server = Bun.serve({
     // GET /
     // ==========================================
 
+    // Rate limiting
+
     if (
       url.pathname === "/" &&
       request.method === "GET"
@@ -72,6 +94,27 @@ const server = Bun.serve({
       url.pathname === "/shorten" &&
       request.method === "POST"
     ) {
+
+
+      const ip = request.headers.get("x-forwarded-for") || request.headers.get("remote-addr") || "unknown";
+
+      if (await isRateLimited(ip)) {
+
+        const retryAfter = await getRetryAfter(ip);
+        return new Response(
+
+          {
+            error: "Too many requests. Please try again later."
+          },
+          {
+            status: 429,
+            headers: {
+              "Retry-After": String(retryAfter)
+            }
+          }
+        );
+      }
+
 
       try {
 
@@ -273,10 +316,9 @@ const server = Bun.serve({
         // ------------------------------------------
 
         console.log(
-          `Saved: ${shortcode} → ${originalUrl}${
-            expiresAt
-              ? ` (expires at ${expiresAt})`
-              : ""
+          `Saved: ${shortcode} → ${originalUrl}${expiresAt
+            ? ` (expires at ${expiresAt})`
+            : ""
           }`
         );
 
@@ -304,6 +346,116 @@ const server = Bun.serve({
             error:
               "Something went wrong: " +
               error.message
+          },
+          {
+            status: 500
+          }
+        );
+
+      }
+
+    }
+
+
+    // ==========================================
+    // GET /stats/:shortcode
+    // ==========================================
+
+    if (
+      request.method === "GET" &&
+      url.pathname.startsWith("/stats/")
+    ) {
+
+      // Remove "/stats/" from pathname
+      const shortcode =
+        url.pathname.substring(7);
+
+
+      // ------------------------------------------
+      // Check shortcode exists
+      // ------------------------------------------
+
+      if (!shortcode) {
+
+        return Response.json(
+          {
+            error: "Shortcode is required"
+          },
+          {
+            status: 400
+          }
+        );
+
+      }
+
+
+      try {
+
+        // ------------------------------------------
+        // Get statistics
+        // ------------------------------------------
+
+        const result = await sql`
+
+          SELECT
+            shortcode,
+            original_url,
+            expires_at,
+            click_count
+
+          FROM urls
+
+          WHERE shortcode = ${shortcode}
+
+        `;
+
+
+        // ------------------------------------------
+        // Shortcode doesn't exist
+        // ------------------------------------------
+
+        if (result.length === 0) {
+
+          return Response.json(
+            {
+              error: "Short URL not found"
+            },
+            {
+              status: 404
+            }
+          );
+
+        }
+
+
+        // ------------------------------------------
+        // Return statistics
+        // ------------------------------------------
+
+        return Response.json({
+
+          shortcode:
+            result[0].shortcode,
+
+          originalUrl:
+            result[0].original_url,
+
+          clickCount:
+            result[0].click_count,
+
+          expiresAt:
+            result[0].expires_at
+
+        });
+
+
+      } catch (error) {
+
+        console.error("ERROR:", error);
+
+        return Response.json(
+          {
+            error: "Internal Server Error"
           },
           {
             status: 500
@@ -351,6 +503,7 @@ const server = Bun.serve({
         const result = await sql`
 
           SELECT
+            shortcode,
             original_url,
             expires_at,
             click_count
@@ -368,8 +521,10 @@ const server = Bun.serve({
 
         if (result.length === 0) {
 
-          return new Response(
-            "Short URL not found",
+          return Response.json(
+            {
+              error: "Short URL not found"
+            },
             {
               status: 404
             }
